@@ -53,11 +53,15 @@ TENANT_APPS = [
     'django.contrib.auth',
 
     # Tenant-specific apps
-    'collectors',
+    'collectors.apps.CollectorsConfig',
     'authentication',
 ]
 
-INSTALLED_APPS = list(SHARED_APPS) + [app for app in TENANT_APPS if app not in SHARED_APPS]
+# Build INSTALLED_APPS avoiding duplicates
+INSTALLED_APPS = list(SHARED_APPS) + [
+    app for app in TENANT_APPS
+    if app not in SHARED_APPS and app + '.apps.CollectorsConfig' not in SHARED_APPS
+]
 
 # Multi-tenancy configuration
 TENANT_MODEL = "collectors.Tenant"
