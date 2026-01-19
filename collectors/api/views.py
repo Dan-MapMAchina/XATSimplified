@@ -1,6 +1,7 @@
 """
 API views for collectors.
 """
+import requests
 from django.utils import timezone
 from django.db.models import Avg, Max, Min, Count
 from rest_framework import generics, status
@@ -365,19 +366,48 @@ class LoadTestResultDetailView(generics.RetrieveUpdateDestroyAPIView):
 class LoadTestCompareView(APIView):
     """
     Compare load test results across multiple collectors.
+
+    Supports both GET (query params) and POST (JSON body) for compatibility.
+    GET /api/v1/loadtests/compare/?collector_ids=uuid1,uuid2&latest=true
+    POST /api/v1/loadtest/compare/ with {"collector_ids": ["uuid1", "uuid2"]}
     """
     permission_classes = [IsAuthenticated]
 
+    def get(self, request):
+        """GET method - accepts collector_ids as query parameter."""
+        collector_ids_param = request.query_params.get('collector_ids', '')
+        if not collector_ids_param:
+            return Response(
+                {'error': 'collector_ids parameter required'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Parse comma-separated IDs or JSON array
+        if collector_ids_param.startswith('['):
+            import json
+            collector_ids = json.loads(collector_ids_param)
+        else:
+            collector_ids = [cid.strip() for cid in collector_ids_param.split(',')]
+
+        return self._compare(request, collector_ids)
+
     def post(self, request):
+        """POST method - accepts collector_ids in JSON body."""
         serializer = LoadTestCompareSerializer(data=request.data)
         if not serializer.is_valid():
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
         collector_ids = serializer.validated_data['collector_ids']
+        return self._compare(request, collector_ids)
+
+    def _compare(self, request, collector_ids):
+        """Common comparison logic for both GET and POST."""
+        # Color palette for servers
+        colors = ['#3b82f6', '#ef4444', '#22c55e', '#f59e0b', '#8b5cf6', '#ec4899', '#06b6d4', '#f97316']
 
         # Get latest load test for each collector
-        results = []
-        for collector_id in collector_ids:
+        servers = []
+        for idx, collector_id in enumerate(collector_ids):
             try:
                 collector = Collector.objects.get(
                     pk=collector_id,
@@ -388,32 +418,195 @@ class LoadTestCompareView(APIView):
                 ).order_by('-created_at').first()
 
                 if latest:
-                    results.append({
-                        'collector_id': str(collector.id),
-                        'collector_name': collector.name,
-                        'specs': collector.specs_summary,
-                        'data_points': [
-                            {'utilization': pct, 'work_units': units}
-                            for pct, units in latest.get_data_points()
-                        ],
-                        'max_units': latest.max_units,
-                        'avg_units': latest.avg_units,
-                        'created_at': latest.created_at
-                    })
-                else:
-                    results.append({
-                        'collector_id': str(collector.id),
-                        'collector_name': collector.name,
-                        'specs': collector.specs_summary,
-                        'error': 'No load test results'
+                    # Format data to match perf-dashboard expected structure
+                    data_points = [
+                        {'busyPct': pct, 'workUnits': units}
+                        for pct, units in latest.get_data_points()
+                    ]
+
+                    # Determine provider from vm_brand
+                    provider_map = {
+                        'aws': 'AWS',
+                        'azure': 'Azure',
+                        'gcp': 'GCP',
+                        'oracle_cloud': 'OCI',
+                        'vmware': 'VMware',
+                        'bare_metal': 'Bare Metal',
+                    }
+                    provider = provider_map.get(collector.vm_brand, collector.vm_brand or 'Unknown')
+
+                    # Calculate max work units for price-performance
+                    max_units = max([d['workUnits'] for d in data_points], default=0)
+
+                    # Get hourly cost (convert Decimal to float for JSON)
+                    hourly_cost = float(collector.hourly_cost) if collector.hourly_cost else None
+
+                    # Calculate price-performance: work units per dollar per hour
+                    # Higher is better (more work units for your money)
+                    price_performance = None
+                    if hourly_cost and hourly_cost > 0 and max_units > 0:
+                        price_performance = round(max_units / hourly_cost, 2)
+
+                    servers.append({
+                        'serverId': str(collector.id),
+                        'serverName': collector.name,
+                        'provider': provider,
+                        'color': colors[idx % len(colors)],
+                        'data': data_points,
+                        'hourlyCost': hourly_cost,
+                        'maxUnits': max_units,
+                        'pricePerformance': price_performance,  # work units per $/hr
                     })
             except Collector.DoesNotExist:
-                results.append({
-                    'collector_id': str(collector_id),
-                    'error': 'Collector not found'
-                })
+                pass  # Skip non-existent collectors
+
+        # Calculate ratios if we have servers
+        ratios = {}
+        if len(servers) >= 2:
+            # Use first server as baseline
+            baseline_max = max([d['workUnits'] for d in servers[0]['data']], default=1)
+            for server in servers[1:]:
+                server_max = max([d['workUnits'] for d in server['data']], default=0)
+                ratios[server['serverId']] = round(server_max / baseline_max, 2) if baseline_max else 0
 
         return Response({
-            'comparison': results,
-            'count': len([r for r in results if 'error' not in r])
+            'servers': servers,
+            'ratios': ratios
         })
+
+
+class RunLoadTestView(APIView):
+    """
+    Trigger a load test on a remote collector via pcd daemon.
+
+    The collector must have pcd_address and pcd_apikey configured.
+    This endpoint calls the pcd daemon's /v1/loadtest endpoint,
+    which runs perfcpumeasure to measure CPU work units at each
+    utilization level (10%, 20%, ... 100%).
+
+    POST /api/v1/loadtests/run/<collector_id>/
+    Body: { "notes": "optional notes" }
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, collector_id):
+        # Get collector
+        try:
+            collector = Collector.objects.get(
+                pk=collector_id,
+                owner=request.user
+            )
+        except Collector.DoesNotExist:
+            return Response(
+                {'error': 'Collector not found'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        # Check if pcd connection is configured
+        if not collector.pcd_address:
+            return Response(
+                {'error': 'Collector does not have pcd_address configured'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        if not collector.pcd_apikey:
+            return Response(
+                {'error': 'Collector does not have pcd_apikey configured'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Build pcd URL
+        pcd_url = f"http://{collector.pcd_address}/v1/loadtest"
+
+        try:
+            # Call pcd daemon
+            # pcd uses 'apikey' header (not X-API-Key)
+            pcd_response = requests.post(
+                pcd_url,
+                headers={
+                    'apikey': collector.pcd_apikey,
+                    'Content-Type': 'application/json'
+                },
+                json={},
+                timeout=300  # 5 minutes timeout for load test
+            )
+
+            if pcd_response.status_code != 200:
+                return Response(
+                    {
+                        'error': f'pcd daemon returned error: {pcd_response.status_code}',
+                        'detail': pcd_response.text
+                    },
+                    status=status.HTTP_502_BAD_GATEWAY
+                )
+
+            # Parse pcd response - format from perfcollector2:
+            # {
+            #     "hostname": "server01",
+            #     "timestamp": 1234567890,
+            #     "numCores": 4,
+            #     "results": [
+            #         {"busyPct": 10, "workUnits": 12345},
+            #         {"busyPct": 20, "workUnits": 23456},
+            #         ...
+            #     ],
+            #     "maxUnits": 123456,
+            #     "avgUnits": 65432,
+            #     "unitsPerSec": 1234.56
+            # }
+            pcd_data = pcd_response.json()
+
+            # Check for error in response
+            if pcd_data.get('error'):
+                return Response(
+                    {'error': f'pcd load test failed: {pcd_data["error"]}'},
+                    status=status.HTTP_500_INTERNAL_SERVER_ERROR
+                )
+
+            results = pcd_data.get('results', [])
+
+            # Convert to our model format
+            units_data = {}
+            for result in results:
+                util = result.get('busyPct', 0)
+                units = result.get('workUnits', 0)
+                field_name = f'units_{util}pct'
+                units_data[field_name] = units
+
+            # Create LoadTestResult
+            notes = request.data.get('notes', '')
+            loadtest = LoadTestResult.objects.create(
+                owner=request.user,
+                collector=collector,
+                notes=notes,
+                units_10pct=units_data.get('units_10pct', 0),
+                units_20pct=units_data.get('units_20pct', 0),
+                units_30pct=units_data.get('units_30pct', 0),
+                units_40pct=units_data.get('units_40pct', 0),
+                units_50pct=units_data.get('units_50pct', 0),
+                units_60pct=units_data.get('units_60pct', 0),
+                units_70pct=units_data.get('units_70pct', 0),
+                units_80pct=units_data.get('units_80pct', 0),
+                units_90pct=units_data.get('units_90pct', 0),
+                units_100pct=units_data.get('units_100pct', 0),
+            )
+
+            # Return in perf-dashboard format
+            serializer = LoadTestResultSerializer(loadtest)
+            return Response(serializer.data, status=status.HTTP_201_CREATED)
+
+        except requests.exceptions.Timeout:
+            return Response(
+                {'error': 'pcd daemon timed out'},
+                status=status.HTTP_504_GATEWAY_TIMEOUT
+            )
+        except requests.exceptions.ConnectionError:
+            return Response(
+                {'error': f'Could not connect to pcd daemon at {collector.pcd_address}'},
+                status=status.HTTP_502_BAD_GATEWAY
+            )
+        except Exception as e:
+            return Response(
+                {'error': f'Error communicating with pcd daemon: {str(e)}'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )

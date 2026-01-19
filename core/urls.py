@@ -13,6 +13,9 @@ urlpatterns = [
     path('api/v1/auth/', include('authentication.urls')),
     path('api/v1/', include('collectors.api.urls')),
 
+    # Cloud provider endpoints
+    path('', include('cloud_providers.urls')),
+
     # Allauth URLs
     path('accounts/', include('allauth.urls')),
 ]

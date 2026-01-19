@@ -23,6 +23,9 @@ services:
     volumes:
       - .:/app
       - media_data:/app/media
+      # Mount cloud provider credentials (read-only)
+      - ~/.oci:/root/.oci:ro
+      - ~/.aws:/root/.aws:ro
     ports:
       - "8001:8000"
     environment:
@@ -31,6 +34,10 @@ services:
       - SECRET_KEY=dev-secret-key-change-in-production
       - ALLOWED_HOSTS=localhost,127.0.0.1,0.0.0.0
       - CORS_ALLOWED_ORIGINS=http://localhost:3000,http://localhost:5173
+      # AWS Cloud Provider (set via environment or ~/.aws/credentials)
+      # - AWS_ACCESS_KEY_ID=your-key-id
+      # - AWS_SECRET_ACCESS_KEY=your-secret-key
+      - AWS_DEFAULT_REGION=us-east-2
     depends_on:
       db:
         condition: service_healthy

@@ -156,6 +156,27 @@ class Collector(models.Model):
         default=StorageType.UNKNOWN
     )
 
+    # Cost tracking for price-performance analysis
+    hourly_cost = models.DecimalField(
+        max_digits=10,
+        decimal_places=4,
+        null=True,
+        blank=True,
+        help_text="Hourly cost in USD for price-performance comparison"
+    )
+
+    # pcd daemon connection (for remote load test execution)
+    pcd_address = models.CharField(
+        max_length=255,
+        blank=True,
+        help_text="pcd daemon address (e.g., 192.168.1.100:8080)"
+    )
+    pcd_apikey = models.CharField(
+        max_length=64,
+        blank=True,
+        help_text="API key for pcd daemon authentication"
+    )
+
     # Timestamps
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

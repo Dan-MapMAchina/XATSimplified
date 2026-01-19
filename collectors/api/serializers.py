@@ -9,6 +9,7 @@ class CollectorSerializer(serializers.ModelSerializer):
     """Serializer for Collector model."""
     owner_username = serializers.ReadOnlyField(source='owner.username')
     specs_summary = serializers.ReadOnlyField()
+    has_pcd_config = serializers.SerializerMethodField()
 
     class Meta:
         model = Collector
@@ -17,6 +18,8 @@ class CollectorSerializer(serializers.ModelSerializer):
             'hostname', 'ip_address', 'os_name', 'os_version', 'kernel_version',
             'vm_brand', 'processor_brand', 'processor_model',
             'vcpus', 'memory_gib', 'storage_gib', 'storage_type',
+            'hourly_cost',
+            'pcd_address', 'pcd_apikey', 'has_pcd_config',
             'created_at', 'updated_at',
             'owner_username', 'specs_summary'
         ]
@@ -25,6 +28,13 @@ class CollectorSerializer(serializers.ModelSerializer):
             'os_name', 'os_version', 'kernel_version',
             'created_at', 'updated_at'
         ]
+        extra_kwargs = {
+            'pcd_apikey': {'write_only': True}  # Don't expose API key in reads
+        }
+
+    def get_has_pcd_config(self, obj):
+        """Check if pcd connection is configured."""
+        return bool(obj.pcd_address and obj.pcd_apikey)
 
 
 class CollectorCreateSerializer(serializers.ModelSerializer):
@@ -136,27 +146,59 @@ class BenchmarkCreateSerializer(serializers.ModelSerializer):
 
 
 class LoadTestResultSerializer(serializers.ModelSerializer):
-    """Serializer for LoadTestResult model."""
-    collector_name = serializers.ReadOnlyField(source='collector.name')
-    data_points = serializers.SerializerMethodField()
-    max_units = serializers.ReadOnlyField()
-    avg_units = serializers.ReadOnlyField()
+    """Serializer for LoadTestResult model.
+
+    Returns data in the format expected by perf-dashboard:
+    - collectorId (not collector)
+    - serverName (not collector_name)
+    - provider (from collector.vm_brand)
+    - data (not data_points) with busyPct/workUnits
+    - createdAt (camelCase)
+    - maxUnits/avgUnits (camelCase)
+    """
+    # Map to perf-dashboard expected field names (camelCase)
+    collectorId = serializers.CharField(source='collector.id', read_only=True)
+    serverName = serializers.CharField(source='collector.name', read_only=True)
+    provider = serializers.SerializerMethodField()
+    benchmarkId = serializers.SerializerMethodField()
+    data = serializers.SerializerMethodField()
+    maxUnits = serializers.ReadOnlyField(source='max_units')
+    avgUnits = serializers.ReadOnlyField(source='avg_units')
+    createdAt = serializers.DateTimeField(source='created_at', read_only=True)
 
     class Meta:
         model = LoadTestResult
         fields = [
-            'id', 'collector', 'collector_name', 'benchmark',
-            'units_10pct', 'units_20pct', 'units_30pct', 'units_40pct', 'units_50pct',
-            'units_60pct', 'units_70pct', 'units_80pct', 'units_90pct', 'units_100pct',
-            'data_points', 'max_units', 'avg_units',
-            'notes', 'created_at'
+            'id', 'collectorId', 'serverName', 'provider', 'benchmarkId',
+            'data', 'maxUnits', 'avgUnits', 'notes', 'createdAt',
+            # Also include original fields for backward compatibility / creation
+            'collector', 'units_10pct', 'units_20pct', 'units_30pct', 'units_40pct',
+            'units_50pct', 'units_60pct', 'units_70pct', 'units_80pct',
+            'units_90pct', 'units_100pct',
         ]
-        read_only_fields = ['id', 'created_at']
+        read_only_fields = ['id', 'createdAt']
 
-    def get_data_points(self, obj):
-        """Return data points as list of dicts for easy charting."""
+    def get_provider(self, obj):
+        """Get provider name from collector's vm_brand."""
+        provider_map = {
+            'aws': 'AWS',
+            'azure': 'Azure',
+            'gcp': 'GCP',
+            'oracle_cloud': 'OCI',
+            'vmware': 'VMware',
+            'bare_metal': 'Bare Metal',
+        }
+        vm_brand = obj.collector.vm_brand if obj.collector else None
+        return provider_map.get(vm_brand, vm_brand or 'Unknown')
+
+    def get_benchmarkId(self, obj):
+        """Get benchmark ID or null."""
+        return str(obj.benchmark.id) if obj.benchmark else None
+
+    def get_data(self, obj):
+        """Return data points in perf-dashboard format with camelCase keys."""
         return [
-            {'utilization': pct, 'work_units': units}
+            {'busyPct': pct, 'workUnits': units}
             for pct, units in obj.get_data_points()
         ]
 

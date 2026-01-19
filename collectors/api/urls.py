@@ -25,8 +25,17 @@ urlpatterns = [
     path('benchmarks/<uuid:pk>/', views.BenchmarkDetailView.as_view(), name='benchmark-detail'),
     path('benchmarks/stats/', views.BenchmarkStatsView.as_view(), name='benchmark-stats'),
 
-    # LoadTest results
+    # LoadTest results (both singular and plural paths for compatibility)
     path('loadtest/', views.LoadTestResultListCreateView.as_view(), name='loadtest-list'),
     path('loadtest/<uuid:pk>/', views.LoadTestResultDetailView.as_view(), name='loadtest-detail'),
     path('loadtest/compare/', views.LoadTestCompareView.as_view(), name='loadtest-compare'),
+
+    # perf-dashboard compatible endpoints (plural "loadtests")
+    path('loadtests/', views.LoadTestResultListCreateView.as_view(), name='loadtests-list'),
+    path('loadtests/<uuid:pk>/', views.LoadTestResultDetailView.as_view(), name='loadtests-detail'),
+    path('loadtests/compare/', views.LoadTestCompareView.as_view(), name='loadtests-compare'),
+
+    # Run load test on remote collector via pcd daemon
+    path('loadtests/run/<uuid:collector_id>/', views.RunLoadTestView.as_view(), name='loadtests-run'),
+    path('loadtest/run/<uuid:collector_id>/', views.RunLoadTestView.as_view(), name='loadtest-run'),
 ]
