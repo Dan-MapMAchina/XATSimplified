@@ -38,4 +38,12 @@ urlpatterns = [
     # Run load test on remote collector via pcd daemon
     path('loadtests/run/<uuid:collector_id>/', views.RunLoadTestView.as_view(), name='loadtests-run'),
     path('loadtest/run/<uuid:collector_id>/', views.RunLoadTestView.as_view(), name='loadtest-run'),
+
+    # PCC endpoints for perf-dashboard compatibility
+    path('pcc/captures', views.PCCCapturesView.as_view(), name='pcc-captures'),
+    path('pcc/captures/<uuid:capture_id>/data', views.PCCCollectionDataView.as_view(), name='pcc-collection-data'),
+
+    # Benchmark comparison endpoints (for perf-dashboard Compare page)
+    path('pcc/benchmark/compare', views.BenchmarkCompareStartView.as_view(), name='pcc-benchmark-compare'),
+    path('pcc/benchmark/compare/<uuid:comparison_id>', views.BenchmarkCompareStatusView.as_view(), name='pcc-benchmark-compare-status'),
 ]

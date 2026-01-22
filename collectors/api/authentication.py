@@ -15,15 +15,26 @@ class APIKeyAuthentication(BaseAuthentication):
     """
 
     def authenticate(self, request):
-        # Try header first
+        api_key = None
+
+        # Try Authorization header first
         auth_header = request.META.get('HTTP_AUTHORIZATION', '')
         if auth_header.startswith('ApiKey '):
             api_key = auth_header[7:]  # Remove 'ApiKey ' prefix
         elif auth_header.startswith('Bearer '):
             # Also accept Bearer for compatibility
             api_key = auth_header[7:]
-        else:
-            # Try query param
+
+        # Try X-API-Key header (used by pcd)
+        if not api_key:
+            api_key = request.META.get('HTTP_X_API_KEY')
+
+        # Try apikey header (used by pcd)
+        if not api_key:
+            api_key = request.META.get('HTTP_APIKEY')
+
+        # Try query param
+        if not api_key:
             api_key = request.query_params.get('api_key')
 
         if not api_key:

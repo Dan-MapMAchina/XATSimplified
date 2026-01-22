@@ -430,3 +430,161 @@ class LoadTestResult(models.Model):
             self.units_100pct
         ])
         return total // 10
+
+
+class PerformanceMetric(models.Model):
+    """
+    Time-series performance metrics from trickled data.
+
+    This model stores real-time performance data received via the trickle
+    ingestion API. Data is collected from pcc and forwarded by pcd.
+
+    Metrics include:
+    - CPU: user, system, iowait, idle, steal percentages
+    - Memory: total, used, available, buffers, cached (in MB)
+    - Disk: read/write bytes and ops (cumulative counters)
+    - Network: rx/tx bytes and packets (cumulative counters)
+    """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    collector = models.ForeignKey(
+        Collector,
+        on_delete=models.CASCADE,
+        related_name='metrics',
+        db_index=True
+    )
+
+    # Timestamp of the measurement
+    timestamp = models.DateTimeField(db_index=True)
+
+    # CPU metrics (percentages 0-100)
+    cpu_user = models.FloatField(null=True, blank=True)
+    cpu_system = models.FloatField(null=True, blank=True)
+    cpu_iowait = models.FloatField(null=True, blank=True)
+    cpu_idle = models.FloatField(null=True, blank=True)
+    cpu_steal = models.FloatField(null=True, blank=True)
+
+    # Memory metrics (in MB)
+    mem_total = models.FloatField(null=True, blank=True)
+    mem_used = models.FloatField(null=True, blank=True)
+    mem_available = models.FloatField(null=True, blank=True)
+    mem_buffers = models.FloatField(null=True, blank=True)
+    mem_cached = models.FloatField(null=True, blank=True)
+
+    # Disk I/O metrics (cumulative counters)
+    disk_read_bytes = models.BigIntegerField(null=True, blank=True)
+    disk_write_bytes = models.BigIntegerField(null=True, blank=True)
+    disk_read_ops = models.BigIntegerField(null=True, blank=True)
+    disk_write_ops = models.BigIntegerField(null=True, blank=True)
+
+    # Network metrics (cumulative counters)
+    net_rx_bytes = models.BigIntegerField(null=True, blank=True)
+    net_tx_bytes = models.BigIntegerField(null=True, blank=True)
+    net_rx_packets = models.BigIntegerField(null=True, blank=True)
+    net_tx_packets = models.BigIntegerField(null=True, blank=True)
+
+    class Meta:
+        verbose_name = 'Performance Metric'
+        verbose_name_plural = 'Performance Metrics'
+        ordering = ['-timestamp']
+        indexes = [
+            models.Index(fields=['collector', '-timestamp']),
+            models.Index(fields=['collector', 'timestamp']),
+            models.Index(fields=['-timestamp']),
+        ]
+        # Prevent duplicate timestamps per collector
+        unique_together = ['collector', 'timestamp']
+
+    def __str__(self):
+        return f"{self.collector.name} @ {self.timestamp}"
+
+    @property
+    def cpu_total(self):
+        """Total CPU utilization (100 - idle)."""
+        if self.cpu_idle is not None:
+            return 100 - self.cpu_idle
+        return None
+
+
+class TrickleSession(models.Model):
+    """
+    Tracks active and completed trickle collection sessions.
+
+    A session is created when the first trickle data arrives from a collector
+    that doesn't have an active session. The session is marked as completed
+    when no data is received for a configurable timeout period.
+
+    This allows:
+    - Live view of active trickle collections
+    - Automatic saving of completed sessions
+    - Organization of historical data by collector and date
+    """
+
+    class Status(models.TextChoices):
+        ACTIVE = 'active', 'Active'
+        COMPLETED = 'completed', 'Completed'
+        SAVED = 'saved', 'Saved'
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    collector = models.ForeignKey(
+        Collector,
+        on_delete=models.CASCADE,
+        related_name='trickle_sessions'
+    )
+
+    # Session metadata
+    status = models.CharField(
+        max_length=20,
+        choices=Status.choices,
+        default=Status.ACTIVE
+    )
+    name = models.CharField(
+        max_length=200,
+        blank=True,
+        help_text="Optional name for this collection session"
+    )
+
+    # Timing
+    started_at = models.DateTimeField(auto_now_add=True)
+    ended_at = models.DateTimeField(null=True, blank=True)
+    last_data_at = models.DateTimeField(null=True, blank=True)
+
+    # Statistics
+    sample_count = models.PositiveIntegerField(default=0)
+    frequency_seconds = models.PositiveIntegerField(
+        null=True,
+        blank=True,
+        help_text="Detected sampling frequency in seconds"
+    )
+
+    # Saved data reference (file path or export info)
+    saved_file = models.CharField(
+        max_length=500,
+        blank=True,
+        help_text="Path to saved CSV file when status is 'saved'"
+    )
+
+    class Meta:
+        ordering = ['-started_at']
+        indexes = [
+            models.Index(fields=['collector', '-started_at']),
+            models.Index(fields=['status']),
+            models.Index(fields=['collector', 'status']),
+            models.Index(fields=['-started_at']),
+        ]
+
+    def __str__(self):
+        return f"{self.collector.name} - {self.started_at.strftime('%Y-%m-%d %H:%M')} ({self.status})"
+
+    @property
+    def duration_seconds(self):
+        """Return duration of the session in seconds."""
+        if self.ended_at:
+            return (self.ended_at - self.started_at).total_seconds()
+        elif self.last_data_at:
+            return (self.last_data_at - self.started_at).total_seconds()
+        return 0
+
+    @property
+    def date_str(self):
+        """Return date as string for grouping (YYYY-MM-DD)."""
+        return self.started_at.strftime('%Y-%m-%d')
