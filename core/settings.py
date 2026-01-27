@@ -12,11 +12,48 @@ import dj_database_url
 # Load environment variables
 load_dotenv()
 
+# ---------------------------------------------------------------------------
+# Sentry Error Tracking
+# ---------------------------------------------------------------------------
+SENTRY_DSN = os.environ.get('SENTRY_DSN', '')
+if SENTRY_DSN:
+    import sentry_sdk
+    from sentry_sdk.integrations.django import DjangoIntegration
+
+    sentry_sdk.init(
+        dsn=SENTRY_DSN,
+        integrations=[DjangoIntegration()],
+        traces_sample_rate=float(os.environ.get('SENTRY_TRACES_SAMPLE_RATE', '0.1')),
+        profiles_sample_rate=float(os.environ.get('SENTRY_PROFILES_SAMPLE_RATE', '0.1')),
+        send_default_pii=False,
+        environment=os.environ.get('SENTRY_ENVIRONMENT', 'development'),
+    )
+
+# ---------------------------------------------------------------------------
+# Azure Key Vault Integration (optional - for Azure deployments)
+# ---------------------------------------------------------------------------
+AZURE_KEY_VAULT_URL = os.environ.get('AZURE_KEY_VAULT_URL', '')
+
+def get_secret_from_keyvault(secret_name, default=None):
+    """Retrieve a secret from Azure Key Vault if configured, otherwise return default."""
+    if not AZURE_KEY_VAULT_URL:
+        return default
+    try:
+        from azure.identity import DefaultAzureCredential
+        from azure.keyvault.secrets import SecretClient
+        credential = DefaultAzureCredential()
+        client = SecretClient(vault_url=AZURE_KEY_VAULT_URL, credential=credential)
+        secret = client.get_secret(secret_name)
+        return secret.value
+    except Exception:
+        return default
+
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 # SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = os.environ.get('SECRET_KEY', 'django-insecure-change-this-in-production')
+# Try Azure Key Vault first, then environment variable, then default
+SECRET_KEY = get_secret_from_keyvault('django-secret-key') or os.environ.get('SECRET_KEY', 'django-insecure-change-this-in-production')
 
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = os.environ.get('DEBUG', 'True').lower() == 'true'
@@ -232,3 +269,37 @@ LOGGING = {
         },
     },
 }
+
+# ---------------------------------------------------------------------------
+# Rate Limiting Configuration (django-ratelimit)
+# ---------------------------------------------------------------------------
+# Cache backend for rate limiting (uses default cache)
+RATELIMIT_USE_CACHE = 'default'
+
+# Enable rate limiting (can be disabled for testing)
+RATELIMIT_ENABLE = os.environ.get('RATELIMIT_ENABLE', 'True').lower() == 'true'
+
+# Default rate limits (requests/period)
+RATELIMIT_DEFAULT_RATE = os.environ.get('RATELIMIT_DEFAULT_RATE', '100/m')  # 100 requests per minute
+
+# Rate limit configuration by endpoint type
+RATELIMIT_AUTH = os.environ.get('RATELIMIT_AUTH', '5/m')        # Login/register: 5 per minute
+RATELIMIT_API = os.environ.get('RATELIMIT_API', '60/m')         # General API: 60 per minute
+RATELIMIT_UPLOAD = os.environ.get('RATELIMIT_UPLOAD', '10/m')   # Upload endpoints: 10 per minute
+RATELIMIT_TRICKLE = os.environ.get('RATELIMIT_TRICKLE', '120/m')  # Trickle data: 120 per minute
+
+# Add cache backend for rate limiting
+CACHES = {
+    'default': {
+        'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',
+        'LOCATION': 'unique-snowflake',
+    }
+}
+
+# Use Redis if available (recommended for production)
+REDIS_URL = os.environ.get('REDIS_URL', '')
+if REDIS_URL:
+    CACHES['default'] = {
+        'BACKEND': 'django.core.cache.backends.redis.RedisCache',
+        'LOCATION': REDIS_URL,
+    }
