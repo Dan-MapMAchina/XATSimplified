@@ -6,14 +6,19 @@ from django.urls import path, include
 from django.conf import settings
 from django.conf.urls.static import static
 from django.views.decorators.csrf import csrf_exempt
-from django.views.generic import RedirectView
 
 # Import TrickleView for pcc compatibility
 from collectors.api.views import TrickleView
+from .views import health_check, api_root
 
 urlpatterns = [
-    # Root redirect to API info or dashboard
-    path('', RedirectView.as_view(url='/api/v1/', permanent=False), name='root'),
+    # Health check endpoint (for load balancers)
+    path('health/', health_check, name='health_check'),
+
+    # Root shows API documentation
+    path('', api_root, name='root'),
+    path('api/v1/', api_root, name='api_root'),
+
     path('admin/', admin.site.urls),
 
     # pcc trickle endpoint (pcd-compatible at /v1/trickle)
