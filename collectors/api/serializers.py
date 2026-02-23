@@ -248,19 +248,37 @@ class BlobTargetSerializer(serializers.ModelSerializer):
         return obj.exports.count()
 
     def validate(self, data):
-        auth_method = data.get('auth_method', 'connection_string')
-        if auth_method == 'key_vault' and not data.get('key_vault_secret_name'):
-            raise serializers.ValidationError(
-                {'key_vault_secret_name': 'Required when auth_method is key_vault'}
+        # On update (PATCH/PUT), fall back to existing instance values
+        instance = self.instance
+        auth_method = data.get(
+            'auth_method',
+            getattr(instance, 'auth_method', 'connection_string')
+        )
+
+        if auth_method == 'key_vault':
+            has_secret = data.get('key_vault_secret_name') or (
+                instance and instance.key_vault_secret_name
             )
-        elif auth_method == 'sas_token' and not data.get('sas_token'):
-            raise serializers.ValidationError(
-                {'sas_token': 'Required when auth_method is sas_token'}
+            if not has_secret:
+                raise serializers.ValidationError(
+                    {'key_vault_secret_name': 'Required when auth_method is key_vault'}
+                )
+        elif auth_method == 'sas_token':
+            has_token = data.get('sas_token') or (
+                instance and instance.sas_token
             )
-        elif auth_method == 'connection_string' and not data.get('connection_string'):
-            raise serializers.ValidationError(
-                {'connection_string': 'Required when auth_method is connection_string'}
+            if not has_token:
+                raise serializers.ValidationError(
+                    {'sas_token': 'Required when auth_method is sas_token'}
+                )
+        elif auth_method == 'connection_string':
+            has_conn = data.get('connection_string') or (
+                instance and instance.connection_string
             )
+            if not has_conn:
+                raise serializers.ValidationError(
+                    {'connection_string': 'Required when auth_method is connection_string'}
+                )
         return data
 
 
