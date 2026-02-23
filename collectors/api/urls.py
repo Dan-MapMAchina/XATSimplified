@@ -46,4 +46,13 @@ urlpatterns = [
     # Benchmark comparison endpoints (for perf-dashboard Compare page)
     path('pcc/benchmark/compare', views.BenchmarkCompareStartView.as_view(), name='pcc-benchmark-compare'),
     path('pcc/benchmark/compare/<uuid:comparison_id>', views.BenchmarkCompareStatusView.as_view(), name='pcc-benchmark-compare-status'),
+
+    # Azure Blob Storage targets
+    path('blob-targets/', views.BlobTargetListCreateView.as_view(), name='blob-target-list'),
+    path('blob-targets/<uuid:pk>/', views.BlobTargetDetailView.as_view(), name='blob-target-detail'),
+    path('blob-targets/<uuid:pk>/test/', views.BlobTargetTestView.as_view(), name='blob-target-test'),
+
+    # Session export to blob storage
+    path('sessions/<uuid:session_id>/export-blob/', views.SessionExportBlobView.as_view(), name='session-export-blob'),
+    path('sessions/<uuid:session_id>/export-blob/status/', views.SessionExportBlobStatusView.as_view(), name='session-export-blob-status'),
 ]

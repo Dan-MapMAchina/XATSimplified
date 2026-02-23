@@ -4,6 +4,7 @@ Parses real /proc data from CollectedData JSON files.
 """
 import json
 import re
+import threading
 from datetime import datetime, timedelta
 from django.utils import timezone
 from rest_framework.views import APIView
@@ -888,13 +889,136 @@ class CompleteSessionAPI(BaseDashboardMetricsAPI):
 
         session.save()
 
-        return Response({
+        response_data = {
             'session_id': str(session.id),
             'status': session.status,
             'ended_at': session.ended_at.isoformat(),
             'sample_count': session.sample_count,
             'message': 'Session marked as completed',
-        })
+        }
+
+        # Optional: auto-export to blob storage
+        blob_target_id = request.data.get('blob_target_id')
+        if blob_target_id:
+            from collectors.models import BlobTarget, BlobExport
+            try:
+                blob_target = BlobTarget.objects.get(
+                    pk=blob_target_id,
+                    owner=request.user,
+                    is_active=True
+                )
+            except BlobTarget.DoesNotExist:
+                response_data['blob_export_error'] = 'Blob target not found or inactive'
+                return Response(response_data)
+
+            export_format = request.data.get(
+                'export_format', blob_target.export_format
+            )
+            if export_format not in ('csv', 'json'):
+                export_format = blob_target.export_format
+
+            blob_export = BlobExport.objects.create(
+                owner=request.user,
+                session=session,
+                blob_target=blob_target,
+                export_format=export_format,
+                status='pending',
+            )
+
+            thread = threading.Thread(
+                target=self._run_blob_export,
+                args=(blob_export.id,)
+            )
+            thread.daemon = True
+            thread.start()
+
+            response_data['blob_export'] = {
+                'export_id': str(blob_export.id),
+                'status': 'pending',
+                'blob_target': blob_target.name,
+                'export_format': export_format,
+            }
+
+        return Response(response_data)
+
+    @staticmethod
+    def _run_blob_export(export_id):
+        """Run blob export in a background thread."""
+        import logging
+        logger = logging.getLogger(__name__)
+
+        from collectors.models import BlobExport, TrickleSession
+
+        try:
+            blob_export = BlobExport.objects.select_related(
+                'session', 'session__collector', 'blob_target'
+            ).get(pk=export_id)
+        except BlobExport.DoesNotExist:
+            return
+
+        blob_export.status = 'in_progress'
+        blob_export.started_at = timezone.now()
+        blob_export.save(update_fields=['status', 'started_at'])
+
+        try:
+            from collectors.services.blob_storage import BlobStorageService
+            service = BlobStorageService(blob_export.blob_target)
+
+            session = blob_export.session
+            metrics_qs = PerformanceMetric.objects.filter(
+                collector=session.collector,
+                timestamp__gte=session.started_at,
+            ).order_by('timestamp')
+
+            if session.ended_at:
+                metrics_qs = metrics_qs.filter(timestamp__lte=session.ended_at)
+
+            blob_path = service.generate_blob_path(
+                session, blob_export.export_format
+            )
+
+            if blob_export.export_format == 'json':
+                data, record_count = service.export_session_json(
+                    session, metrics_qs
+                )
+                content_type = 'application/json'
+            else:
+                data, record_count = service.export_session_csv(
+                    session, metrics_qs
+                )
+                content_type = 'text/csv'
+
+            blob_url = service.upload_blob(blob_path, data, content_type)
+
+            blob_export.status = 'completed'
+            blob_export.blob_path = blob_path
+            blob_export.blob_url = blob_url
+            blob_export.records_exported = record_count
+            blob_export.file_size_bytes = len(data)
+            blob_export.completed_at = timezone.now()
+            blob_export.save(update_fields=[
+                'status', 'blob_path', 'blob_url', 'records_exported',
+                'file_size_bytes', 'completed_at',
+            ])
+
+            session.status = TrickleSession.Status.SAVED
+            session.saved_file = blob_url
+            session.save(update_fields=['status', 'saved_file'])
+
+            logger.info(
+                f"Blob export {export_id} completed: "
+                f"{record_count} records to {blob_path}"
+            )
+
+        except Exception as e:
+            logger.error(f"Blob export {export_id} failed: {e}")
+            blob_export.status = 'failed'
+            blob_export.error_message = str(e)[:1000]
+            blob_export.retry_count = (blob_export.retry_count or 0) + 1
+            blob_export.completed_at = timezone.now()
+            blob_export.save(update_fields=[
+                'status', 'error_message', 'retry_count', 'completed_at',
+            ])
 
 
 class CheckAndCompleteInactiveSessionsAPI(BaseDashboardMetricsAPI):

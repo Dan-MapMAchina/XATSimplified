@@ -588,3 +588,139 @@ class TrickleSession(models.Model):
     def date_str(self):
         """Return date as string for grouping (YYYY-MM-DD)."""
         return self.started_at.strftime('%Y-%m-%d')
+
+
+class BlobTarget(models.Model):
+    """
+    Azure Blob Storage target configuration.
+
+    Users configure blob targets where trickle session data can be exported.
+    Supports three authentication modes:
+    1. Azure Key Vault (preferred for production)
+    2. SAS Token
+    3. Connection String
+    """
+
+    class AuthMethod(models.TextChoices):
+        KEY_VAULT = 'key_vault', 'Azure Key Vault'
+        SAS_TOKEN = 'sas_token', 'SAS Token'
+        CONNECTION_STRING = 'connection_string', 'Connection String'
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    owner = models.ForeignKey(User, on_delete=models.CASCADE, related_name='blob_targets')
+    name = models.CharField(max_length=100, help_text="Friendly name for this blob target")
+
+    # Azure Blob configuration
+    account_name = models.CharField(max_length=100, help_text="Azure Storage account name")
+    container_name = models.CharField(max_length=63, help_text="Blob container name")
+
+    # Authentication
+    auth_method = models.CharField(
+        max_length=20,
+        choices=AuthMethod.choices,
+        default=AuthMethod.CONNECTION_STRING
+    )
+    key_vault_secret_name = models.CharField(
+        max_length=200,
+        blank=True,
+        help_text="Key Vault secret name containing the connection string"
+    )
+    sas_token = models.TextField(
+        blank=True,
+        help_text="SAS token for container-level access"
+    )
+    connection_string = models.TextField(
+        blank=True,
+        help_text="Azure Storage connection string"
+    )
+
+    # Export preferences
+    path_prefix = models.CharField(
+        max_length=200,
+        blank=True,
+        help_text="Optional path prefix within the container"
+    )
+    export_format = models.CharField(
+        max_length=10,
+        choices=[('csv', 'CSV'), ('json', 'JSON')],
+        default='csv'
+    )
+
+    # Status
+    is_active = models.BooleanField(default=True)
+    last_tested_at = models.DateTimeField(null=True, blank=True)
+    last_test_success = models.BooleanField(null=True, blank=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-created_at']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['owner', 'name'],
+                name='unique_blob_target_name_per_owner'
+            )
+        ]
+
+    def __str__(self):
+        return f"{self.name} ({self.account_name}/{self.container_name})"
+
+
+class BlobExport(models.Model):
+    """
+    Tracks individual export operations from trickle sessions to blob storage.
+    """
+
+    class Status(models.TextChoices):
+        PENDING = 'pending', 'Pending'
+        IN_PROGRESS = 'in_progress', 'In Progress'
+        COMPLETED = 'completed', 'Completed'
+        FAILED = 'failed', 'Failed'
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    owner = models.ForeignKey(User, on_delete=models.CASCADE, related_name='blob_exports')
+    session = models.ForeignKey(
+        TrickleSession,
+        on_delete=models.CASCADE,
+        related_name='blob_exports'
+    )
+    blob_target = models.ForeignKey(
+        BlobTarget,
+        on_delete=models.CASCADE,
+        related_name='exports'
+    )
+
+    # Export details
+    status = models.CharField(
+        max_length=20,
+        choices=Status.choices,
+        default=Status.PENDING
+    )
+    blob_path = models.CharField(max_length=500, blank=True)
+    blob_url = models.URLField(max_length=1000, blank=True)
+
+    # Statistics
+    records_exported = models.PositiveIntegerField(default=0)
+    file_size_bytes = models.PositiveIntegerField(default=0)
+    export_format = models.CharField(max_length=10, default='csv')
+
+    # Error tracking
+    error_message = models.TextField(blank=True)
+    retry_count = models.PositiveIntegerField(default=0)
+
+    # Timing
+    started_at = models.DateTimeField(null=True, blank=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['session', '-created_at']),
+            models.Index(fields=['owner', '-created_at']),
+            models.Index(fields=['status']),
+        ]
+
+    def __str__(self):
+        return f"Export {self.session} -> {self.blob_target.name} ({self.status})"

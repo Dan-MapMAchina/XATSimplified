@@ -303,3 +303,9 @@ if REDIS_URL:
         'BACKEND': 'django.core.cache.backends.redis.RedisCache',
         'LOCATION': REDIS_URL,
     }
+
+# ---------------------------------------------------------------------------
+# Azure Blob Storage Configuration
+# ---------------------------------------------------------------------------
+AZURE_BLOB_DEFAULT_CONTAINER = os.environ.get('AZURE_BLOB_DEFAULT_CONTAINER', 'perfdata')
+AZURE_BLOB_MAX_EXPORT_SIZE = int(os.environ.get('AZURE_BLOB_MAX_EXPORT_SIZE', str(500 * 1024 * 1024)))  # 500MB

@@ -33,6 +33,7 @@ django-ratelimit==4.1.0
 # Error Tracking
 sentry-sdk[django]==1.39.1
 
-# Azure Key Vault (optional - for Azure deployments)
+# Azure (Key Vault + Blob Storage)
 azure-identity==1.15.0
 azure-keyvault-secrets==4.7.0
+azure-storage-blob==12.19.0

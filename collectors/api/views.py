@@ -12,7 +12,10 @@ from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 
-from collectors.models import Collector, CollectedData, Benchmark, LoadTestResult, PerformanceMetric
+from collectors.models import (
+    Collector, CollectedData, Benchmark, LoadTestResult,
+    PerformanceMetric, TrickleSession, BlobTarget, BlobExport,
+)
 from .serializers import (
     CollectorSerializer,
     CollectorCreateSerializer,
@@ -23,6 +26,8 @@ from .serializers import (
     BenchmarkCreateSerializer,
     LoadTestResultSerializer,
     LoadTestCompareSerializer,
+    BlobTargetSerializer,
+    BlobExportSerializer,
 )
 from .authentication import APIKeyAuthentication
 
@@ -2112,3 +2117,259 @@ class BenchmarkCompareStatusView(APIView):
                 }
 
         return Response(response_data)
+
+
+# =============================================================================
+# Azure Blob Storage Views
+# =============================================================================
+
+class BlobTargetListCreateView(generics.ListCreateAPIView):
+    """
+    List or create Azure Blob Storage targets.
+
+    GET: List all blob targets for the authenticated user.
+    POST: Create a new blob target configuration.
+    """
+    permission_classes = [IsAuthenticated]
+    serializer_class = BlobTargetSerializer
+
+    def get_queryset(self):
+        return BlobTarget.objects.filter(owner=self.request.user)
+
+    def perform_create(self, serializer):
+        serializer.save(owner=self.request.user)
+
+
+class BlobTargetDetailView(generics.RetrieveUpdateDestroyAPIView):
+    """
+    Retrieve, update, or delete a blob target.
+    """
+    permission_classes = [IsAuthenticated]
+    serializer_class = BlobTargetSerializer
+
+    def get_queryset(self):
+        return BlobTarget.objects.filter(owner=self.request.user)
+
+
+class BlobTargetTestView(APIView):
+    """
+    Test connectivity to an Azure Blob Storage target.
+
+    POST /api/v1/blob-targets/<uuid>/test/
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, pk):
+        try:
+            blob_target = BlobTarget.objects.get(pk=pk, owner=request.user)
+        except BlobTarget.DoesNotExist:
+            return Response(
+                {'error': 'Blob target not found'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        from collectors.services.blob_storage import BlobStorageService
+        service = BlobStorageService(blob_target)
+        success, message = service.test_connection()
+
+        # Update test status
+        blob_target.last_tested_at = timezone.now()
+        blob_target.last_test_success = success
+        blob_target.save(update_fields=['last_tested_at', 'last_test_success'])
+
+        return Response({
+            'success': success,
+            'message': message,
+        }, status=status.HTTP_200_OK if success else status.HTTP_400_BAD_REQUEST)
+
+
+class SessionExportBlobView(APIView):
+    """
+    Export a trickle session's metrics to Azure Blob Storage.
+
+    POST /api/v1/sessions/<uuid>/export-blob/
+    Body: {
+        "blob_target_id": "<uuid>",
+        "export_format": "csv"  // optional, defaults to blob target's format
+    }
+
+    Returns HTTP 202 immediately. Export runs in background.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, session_id):
+        import threading
+
+        # Validate session
+        try:
+            session = TrickleSession.objects.get(
+                pk=session_id,
+                collector__owner=request.user
+            )
+        except TrickleSession.DoesNotExist:
+            return Response(
+                {'error': 'Session not found'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        # Validate blob target
+        blob_target_id = request.data.get('blob_target_id')
+        if not blob_target_id:
+            return Response(
+                {'error': 'blob_target_id is required'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        try:
+            blob_target = BlobTarget.objects.get(
+                pk=blob_target_id,
+                owner=request.user,
+                is_active=True
+            )
+        except BlobTarget.DoesNotExist:
+            return Response(
+                {'error': 'Blob target not found or inactive'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        # Determine export format
+        export_format = request.data.get('export_format', blob_target.export_format)
+        if export_format not in ('csv', 'json'):
+            return Response(
+                {'error': 'export_format must be "csv" or "json"'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Create BlobExport record
+        blob_export = BlobExport.objects.create(
+            owner=request.user,
+            session=session,
+            blob_target=blob_target,
+            export_format=export_format,
+            status='pending',
+        )
+
+        # Start export in background thread
+        thread = threading.Thread(
+            target=self._run_export,
+            args=(blob_export.id,)
+        )
+        thread.daemon = True
+        thread.start()
+
+        serializer = BlobExportSerializer(blob_export)
+        return Response(serializer.data, status=status.HTTP_202_ACCEPTED)
+
+    def _run_export(self, export_id):
+        """Run the blob export in a background thread."""
+        import logging
+        logger = logging.getLogger(__name__)
+
+        try:
+            blob_export = BlobExport.objects.select_related(
+                'session', 'session__collector', 'blob_target'
+            ).get(pk=export_id)
+        except BlobExport.DoesNotExist:
+            return
+
+        blob_export.status = 'in_progress'
+        blob_export.started_at = timezone.now()
+        blob_export.save(update_fields=['status', 'started_at'])
+
+        try:
+            from collectors.services.blob_storage import BlobStorageService
+            service = BlobStorageService(blob_export.blob_target)
+
+            session = blob_export.session
+            metrics_qs = PerformanceMetric.objects.filter(
+                collector=session.collector,
+                timestamp__gte=session.started_at,
+            ).order_by('timestamp')
+
+            if session.ended_at:
+                metrics_qs = metrics_qs.filter(timestamp__lte=session.ended_at)
+
+            # Generate blob path
+            blob_path = service.generate_blob_path(
+                session, blob_export.export_format
+            )
+
+            # Export data
+            if blob_export.export_format == 'json':
+                data, record_count = service.export_session_json(
+                    session, metrics_qs
+                )
+                content_type = 'application/json'
+            else:
+                data, record_count = service.export_session_csv(
+                    session, metrics_qs
+                )
+                content_type = 'text/csv'
+
+            # Upload to blob
+            blob_url = service.upload_blob(blob_path, data, content_type)
+
+            # Update export record
+            blob_export.status = 'completed'
+            blob_export.blob_path = blob_path
+            blob_export.blob_url = blob_url
+            blob_export.records_exported = record_count
+            blob_export.file_size_bytes = len(data)
+            blob_export.completed_at = timezone.now()
+            blob_export.save(update_fields=[
+                'status', 'blob_path', 'blob_url', 'records_exported',
+                'file_size_bytes', 'completed_at',
+            ])
+
+            # Update session status to SAVED
+            session.status = TrickleSession.Status.SAVED
+            session.saved_file = blob_url
+            session.save(update_fields=['status', 'saved_file'])
+
+            logger.info(
+                f"Blob export {export_id} completed: "
+                f"{record_count} records to {blob_path}"
+            )
+
+        except Exception as e:
+            logger.error(f"Blob export {export_id} failed: {e}")
+            blob_export.status = 'failed'
+            blob_export.error_message = str(e)[:1000]
+            blob_export.retry_count = (blob_export.retry_count or 0) + 1
+            blob_export.completed_at = timezone.now()
+            blob_export.save(update_fields=[
+                'status', 'error_message', 'retry_count', 'completed_at',
+            ])
+
+
+class SessionExportBlobStatusView(APIView):
+    """
+    Get the status of blob exports for a session.
+
+    GET /api/v1/sessions/<uuid>/export-blob/status/
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, session_id):
+        # Verify session ownership
+        try:
+            session = TrickleSession.objects.get(
+                pk=session_id,
+                collector__owner=request.user
+            )
+        except TrickleSession.DoesNotExist:
+            return Response(
+                {'error': 'Session not found'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        exports = BlobExport.objects.filter(
+            session=session,
+            owner=request.user
+        ).order_by('-created_at')
+
+        serializer = BlobExportSerializer(exports, many=True)
+        return Response({
+            'session_id': str(session.id),
+            'exports': serializer.data,
+        })

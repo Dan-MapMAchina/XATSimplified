@@ -2,7 +2,10 @@
 API serializers for collectors.
 """
 from rest_framework import serializers
-from collectors.models import Collector, CollectedData, Benchmark, LoadTestResult
+from collectors.models import (
+    Collector, CollectedData, Benchmark, LoadTestResult,
+    BlobTarget, BlobExport,
+)
 
 
 class CollectorSerializer(serializers.ModelSerializer):
@@ -211,3 +214,77 @@ class LoadTestCompareSerializer(serializers.Serializer):
         max_length=10,
         help_text="List of collector IDs to compare"
     )
+
+
+# =============================================================================
+# Azure Blob Storage Serializers
+# =============================================================================
+
+class BlobTargetSerializer(serializers.ModelSerializer):
+    """Serializer for BlobTarget model."""
+    owner_username = serializers.ReadOnlyField(source='owner.username')
+    export_count = serializers.SerializerMethodField()
+
+    class Meta:
+        model = BlobTarget
+        fields = [
+            'id', 'name', 'account_name', 'container_name',
+            'auth_method', 'key_vault_secret_name',
+            'sas_token', 'connection_string',
+            'path_prefix', 'export_format',
+            'is_active', 'last_tested_at', 'last_test_success',
+            'created_at', 'updated_at', 'owner_username', 'export_count',
+        ]
+        read_only_fields = [
+            'id', 'last_tested_at', 'last_test_success',
+            'created_at', 'updated_at',
+        ]
+        extra_kwargs = {
+            'sas_token': {'write_only': True},
+            'connection_string': {'write_only': True},
+        }
+
+    def get_export_count(self, obj):
+        return obj.exports.count()
+
+    def validate(self, data):
+        auth_method = data.get('auth_method', 'connection_string')
+        if auth_method == 'key_vault' and not data.get('key_vault_secret_name'):
+            raise serializers.ValidationError(
+                {'key_vault_secret_name': 'Required when auth_method is key_vault'}
+            )
+        elif auth_method == 'sas_token' and not data.get('sas_token'):
+            raise serializers.ValidationError(
+                {'sas_token': 'Required when auth_method is sas_token'}
+            )
+        elif auth_method == 'connection_string' and not data.get('connection_string'):
+            raise serializers.ValidationError(
+                {'connection_string': 'Required when auth_method is connection_string'}
+            )
+        return data
+
+
+class BlobExportSerializer(serializers.ModelSerializer):
+    """Serializer for BlobExport model."""
+    session_name = serializers.SerializerMethodField()
+    blob_target_name = serializers.ReadOnlyField(source='blob_target.name')
+    collector_name = serializers.ReadOnlyField(source='session.collector.name')
+
+    class Meta:
+        model = BlobExport
+        fields = [
+            'id', 'session', 'session_name', 'blob_target', 'blob_target_name',
+            'collector_name', 'status', 'blob_path', 'blob_url',
+            'records_exported', 'file_size_bytes', 'export_format',
+            'error_message', 'retry_count',
+            'started_at', 'completed_at', 'created_at',
+        ]
+        read_only_fields = [
+            'id', 'status', 'blob_path', 'blob_url',
+            'records_exported', 'file_size_bytes',
+            'error_message', 'retry_count',
+            'started_at', 'completed_at', 'created_at',
+        ]
+
+    def get_session_name(self, obj):
+        return obj.session.name or str(obj.session.id)
