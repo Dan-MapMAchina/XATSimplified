@@ -3,10 +3,11 @@ API views for collectors.
 """
 import requests
 from django.utils import timezone
+from django.db import IntegrityError
 from django.db.models import Avg, Max, Min, Count
 from django.views.decorators.csrf import csrf_exempt
 from django.utils.decorators import method_decorator
-from rest_framework import generics, status
+from rest_framework import generics, serializers, status
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated, AllowAny
@@ -2137,7 +2138,12 @@ class BlobTargetListCreateView(generics.ListCreateAPIView):
         return BlobTarget.objects.filter(owner=self.request.user)
 
     def perform_create(self, serializer):
-        serializer.save(owner=self.request.user)
+        try:
+            serializer.save(owner=self.request.user)
+        except IntegrityError:
+            raise serializers.ValidationError(
+                {'name': 'A blob target with this name already exists.'}
+            )
 
 
 class BlobTargetDetailView(generics.RetrieveUpdateDestroyAPIView):
