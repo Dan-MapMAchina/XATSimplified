@@ -530,8 +530,17 @@ class BlobStorageServiceTests(BlobExportTestBase):
         self.assertIsInstance(data, bytes)
         lines = data.decode('utf-8').strip().split('\n')
         self.assertEqual(len(lines), 6)  # header + 5 rows
-        self.assertIn('timestamp', lines[0])
-        self.assertIn('cpu_user', lines[0])
+        header = lines[0]
+        self.assertIn('timestamp', header)
+        self.assertIn('cpu_user', header)
+        # Verify rate columns are present in CSV header
+        for col in [
+            'disk_read_iops', 'disk_write_iops',
+            'disk_read_mbps', 'disk_write_mbps',
+            'net_rx_mbps', 'net_tx_mbps',
+            'net_rx_pps', 'net_tx_pps',
+        ]:
+            self.assertIn(col, header, f"Missing rate column: {col}")
 
     def test_export_session_json(self):
         target = self._create_blob_target()
@@ -550,6 +559,80 @@ class BlobStorageServiceTests(BlobExportTestBase):
         self.assertEqual(len(parsed['metrics']), 5)
         self.assertIn('cpu', parsed['metrics'][0])
         self.assertIn('memory', parsed['metrics'][0])
+        # Verify rate fields present in disk and network objects
+        metric = parsed['metrics'][0]
+        self.assertIn('disk', metric)
+        for key in ['read_iops', 'write_iops', 'read_mbps', 'write_mbps']:
+            self.assertIn(key, metric['disk'], f"Missing disk rate key: {key}")
+        self.assertIn('network', metric)
+        for key in ['rx_mbps', 'tx_mbps', 'rx_pps', 'tx_pps']:
+            self.assertIn(key, metric['network'], f"Missing network rate key: {key}")
+
+    def test_export_session_csv_with_rate_fields(self):
+        """Verify that populated rate fields appear in CSV data rows."""
+        target = self._create_blob_target()
+        service = BlobStorageService(target)
+
+        # Update a metric to have rate fields
+        metric = PerformanceMetric.objects.filter(
+            collector=self.collector,
+        ).order_by('timestamp').first()
+        metric.disk_read_iops = 150.5
+        metric.disk_write_iops = 75.0
+        metric.disk_read_mbps = 12.3
+        metric.disk_write_mbps = 6.1
+        metric.net_rx_mbps = 100.0
+        metric.net_tx_mbps = 50.0
+        metric.net_rx_pps = 5000.0
+        metric.net_tx_pps = 2500.0
+        metric.save()
+
+        metrics = PerformanceMetric.objects.filter(
+            collector=self.collector,
+        ).order_by('timestamp')
+
+        data, count = service.export_session_csv(self.session, metrics)
+        lines = data.decode('utf-8').strip().split('\n')
+
+        # Parse header to find column indices
+        import csv
+        import io
+        reader = csv.reader(io.StringIO(lines[0] + '\n' + lines[1]))
+        header = next(reader)
+        first_row = next(reader)
+
+        iops_idx = header.index('disk_read_iops')
+        self.assertEqual(first_row[iops_idx], '150.5')
+        rx_mbps_idx = header.index('net_rx_mbps')
+        self.assertEqual(first_row[rx_mbps_idx], '100.0')
+
+    def test_export_session_json_with_rate_fields(self):
+        """Verify that populated rate fields appear in JSON output."""
+        target = self._create_blob_target()
+        service = BlobStorageService(target)
+
+        # Update a metric to have rate fields
+        metric = PerformanceMetric.objects.filter(
+            collector=self.collector,
+        ).order_by('timestamp').first()
+        metric.disk_read_iops = 150.5
+        metric.net_rx_mbps = 100.0
+        metric.save()
+
+        metrics = PerformanceMetric.objects.filter(
+            collector=self.collector,
+        ).order_by('timestamp')
+
+        data, count = service.export_session_json(self.session, metrics)
+        import json
+        parsed = json.loads(data)
+        first_metric = parsed['metrics'][0]
+
+        self.assertEqual(first_metric['disk']['read_iops'], 150.5)
+        self.assertEqual(first_metric['network']['rx_mbps'], 100.0)
+        # Fields without data should be None
+        self.assertIsNone(first_metric['disk']['write_iops'])
+        self.assertIsNone(first_metric['network']['tx_pps'])
 
     def test_export_session_csv_empty(self):
         target = self._create_blob_target()

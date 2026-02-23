@@ -482,6 +482,18 @@ class PerformanceMetric(models.Model):
     net_rx_packets = models.BigIntegerField(null=True, blank=True)
     net_tx_packets = models.BigIntegerField(null=True, blank=True)
 
+    # Cubed disk rates (computed from cumulative counters via CubingService)
+    disk_read_iops = models.FloatField(null=True, blank=True, help_text="Read IOPS (ops/sec)")
+    disk_write_iops = models.FloatField(null=True, blank=True, help_text="Write IOPS (ops/sec)")
+    disk_read_mbps = models.FloatField(null=True, blank=True, help_text="Read throughput (MB/sec)")
+    disk_write_mbps = models.FloatField(null=True, blank=True, help_text="Write throughput (MB/sec)")
+
+    # Cubed network rates (computed from cumulative counters via CubingService)
+    net_rx_mbps = models.FloatField(null=True, blank=True, help_text="Receive rate (Mbit/sec)")
+    net_tx_mbps = models.FloatField(null=True, blank=True, help_text="Transmit rate (Mbit/sec)")
+    net_rx_pps = models.FloatField(null=True, blank=True, help_text="Receive packets/sec")
+    net_tx_pps = models.FloatField(null=True, blank=True, help_text="Transmit packets/sec")
+
     class Meta:
         verbose_name = 'Performance Metric'
         verbose_name_plural = 'Performance Metrics'
@@ -555,6 +567,10 @@ class TrickleSession(models.Model):
         blank=True,
         help_text="Detected sampling frequency in seconds"
     )
+
+    # Delta state for cubing: stores previous sample's raw /proc values
+    # Format: {"cpu_jiffies": [...], "disk": {...}, "net": {...}, "timestamp": ...}
+    previous_sample = models.JSONField(null=True, blank=True, default=None)
 
     # Saved data reference (file path or export info)
     saved_file = models.CharField(

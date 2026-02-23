@@ -104,7 +104,9 @@ class BlobStorageService:
             'cpu_user', 'cpu_system', 'cpu_iowait', 'cpu_idle', 'cpu_steal',
             'mem_total', 'mem_used', 'mem_available', 'mem_buffers', 'mem_cached',
             'disk_read_bytes', 'disk_write_bytes', 'disk_read_ops', 'disk_write_ops',
+            'disk_read_iops', 'disk_write_iops', 'disk_read_mbps', 'disk_write_mbps',
             'net_rx_bytes', 'net_tx_bytes', 'net_rx_packets', 'net_tx_packets',
+            'net_rx_mbps', 'net_tx_mbps', 'net_rx_pps', 'net_tx_pps',
         ])
 
         record_count = 0
@@ -126,10 +128,18 @@ class BlobStorageService:
                 m.disk_write_bytes if m.disk_write_bytes is not None else '',
                 m.disk_read_ops if m.disk_read_ops is not None else '',
                 m.disk_write_ops if m.disk_write_ops is not None else '',
+                m.disk_read_iops if m.disk_read_iops is not None else '',
+                m.disk_write_iops if m.disk_write_iops is not None else '',
+                m.disk_read_mbps if m.disk_read_mbps is not None else '',
+                m.disk_write_mbps if m.disk_write_mbps is not None else '',
                 m.net_rx_bytes if m.net_rx_bytes is not None else '',
                 m.net_tx_bytes if m.net_tx_bytes is not None else '',
                 m.net_rx_packets if m.net_rx_packets is not None else '',
                 m.net_tx_packets if m.net_tx_packets is not None else '',
+                m.net_rx_mbps if m.net_rx_mbps is not None else '',
+                m.net_tx_mbps if m.net_tx_mbps is not None else '',
+                m.net_rx_pps if m.net_rx_pps is not None else '',
+                m.net_tx_pps if m.net_tx_pps is not None else '',
             ])
             record_count += 1
 
@@ -157,11 +167,17 @@ class BlobStorageService:
                     'write_bytes': m.disk_write_bytes,
                     'read_ops': m.disk_read_ops,
                     'write_ops': m.disk_write_ops,
+                    'read_iops': m.disk_read_iops,
+                    'write_iops': m.disk_write_iops,
+                    'read_mbps': m.disk_read_mbps,
+                    'write_mbps': m.disk_write_mbps,
                 },
                 'network': {
                     'rx_bytes': m.net_rx_bytes, 'tx_bytes': m.net_tx_bytes,
                     'rx_packets': m.net_rx_packets,
                     'tx_packets': m.net_tx_packets,
+                    'rx_mbps': m.net_rx_mbps, 'tx_mbps': m.net_tx_mbps,
+                    'rx_pps': m.net_rx_pps, 'tx_pps': m.net_tx_pps,
                 },
             })
 

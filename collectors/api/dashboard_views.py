@@ -453,10 +453,22 @@ class CollectorLiveMetricsAPI(BaseDashboardMetricsAPI):
         disk_read_ops = []
         disk_write_ops = []
 
+        # Cubed disk rates (visualization-ready)
+        disk_read_iops = []
+        disk_write_iops = []
+        disk_read_mbps = []
+        disk_write_mbps = []
+
         net_rx_bytes = []
         net_tx_bytes = []
         net_rx_packets = []
         net_tx_packets = []
+
+        # Cubed network rates (visualization-ready)
+        net_rx_mbps = []
+        net_tx_mbps = []
+        net_rx_pps = []
+        net_tx_pps = []
 
         for m in metrics:
             timestamps.append(m.timestamp.isoformat())
@@ -481,11 +493,23 @@ class CollectorLiveMetricsAPI(BaseDashboardMetricsAPI):
             disk_read_ops.append(m.disk_read_ops or 0)
             disk_write_ops.append(m.disk_write_ops or 0)
 
+            # Disk rates (cubed)
+            disk_read_iops.append(m.disk_read_iops)
+            disk_write_iops.append(m.disk_write_iops)
+            disk_read_mbps.append(m.disk_read_mbps)
+            disk_write_mbps.append(m.disk_write_mbps)
+
             # Network metrics (cumulative counters)
             net_rx_bytes.append(m.net_rx_bytes or 0)
             net_tx_bytes.append(m.net_tx_bytes or 0)
             net_rx_packets.append(m.net_rx_packets or 0)
             net_tx_packets.append(m.net_tx_packets or 0)
+
+            # Network rates (cubed)
+            net_rx_mbps.append(m.net_rx_mbps)
+            net_tx_mbps.append(m.net_tx_mbps)
+            net_rx_pps.append(m.net_rx_pps)
+            net_tx_pps.append(m.net_tx_pps)
 
         return Response({
             'collector_id': str(collector.id),
@@ -512,12 +536,20 @@ class CollectorLiveMetricsAPI(BaseDashboardMetricsAPI):
                 'write_bytes': disk_write_bytes,
                 'read_ops': disk_read_ops,
                 'write_ops': disk_write_ops,
+                'read_iops': disk_read_iops,
+                'write_iops': disk_write_iops,
+                'read_mbps': disk_read_mbps,
+                'write_mbps': disk_write_mbps,
             },
             'network': {
                 'rx_bytes': net_rx_bytes,
                 'tx_bytes': net_tx_bytes,
                 'rx_packets': net_rx_packets,
                 'tx_packets': net_tx_packets,
+                'rx_mbps': net_rx_mbps,
+                'tx_mbps': net_tx_mbps,
+                'rx_pps': net_rx_pps,
+                'tx_pps': net_tx_pps,
             },
         })
 
@@ -785,11 +817,19 @@ class SessionDataAPI(BaseDashboardMetricsAPI):
         disk_write_bytes = []
         disk_read_ops = []
         disk_write_ops = []
+        disk_read_iops = []
+        disk_write_iops = []
+        disk_read_mbps = []
+        disk_write_mbps = []
 
         net_rx_bytes = []
         net_tx_bytes = []
         net_rx_packets = []
         net_tx_packets = []
+        net_rx_mbps = []
+        net_tx_mbps = []
+        net_rx_pps = []
+        net_tx_pps = []
 
         for m in metrics:
             timestamps.append(m.timestamp.isoformat())
@@ -807,10 +847,18 @@ class SessionDataAPI(BaseDashboardMetricsAPI):
             disk_write_bytes.append(m.disk_write_bytes or 0)
             disk_read_ops.append(m.disk_read_ops or 0)
             disk_write_ops.append(m.disk_write_ops or 0)
+            disk_read_iops.append(m.disk_read_iops)
+            disk_write_iops.append(m.disk_write_iops)
+            disk_read_mbps.append(m.disk_read_mbps)
+            disk_write_mbps.append(m.disk_write_mbps)
             net_rx_bytes.append(m.net_rx_bytes or 0)
             net_tx_bytes.append(m.net_tx_bytes or 0)
             net_rx_packets.append(m.net_rx_packets or 0)
             net_tx_packets.append(m.net_tx_packets or 0)
+            net_rx_mbps.append(m.net_rx_mbps)
+            net_tx_mbps.append(m.net_tx_mbps)
+            net_rx_pps.append(m.net_rx_pps)
+            net_tx_pps.append(m.net_tx_pps)
 
         return Response({
             'session_id': str(session.id),
@@ -841,12 +889,20 @@ class SessionDataAPI(BaseDashboardMetricsAPI):
                 'write_bytes': disk_write_bytes,
                 'read_ops': disk_read_ops,
                 'write_ops': disk_write_ops,
+                'read_iops': disk_read_iops,
+                'write_iops': disk_write_iops,
+                'read_mbps': disk_read_mbps,
+                'write_mbps': disk_write_mbps,
             },
             'network': {
                 'rx_bytes': net_rx_bytes,
                 'tx_bytes': net_tx_bytes,
                 'rx_packets': net_rx_packets,
                 'tx_packets': net_tx_packets,
+                'rx_mbps': net_rx_mbps,
+                'tx_mbps': net_tx_mbps,
+                'rx_pps': net_rx_pps,
+                'tx_pps': net_tx_pps,
             },
         })
 

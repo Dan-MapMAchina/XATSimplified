@@ -1830,13 +1830,13 @@ class TrickleView(APIView):
             }
         )
 
-        # Process the measurements using the same logic as MetricsUploadView
-        metrics_count = self._process_trickle_measurements(collector, measurements)
+        # Process the measurements with cubing (delta-based rates)
+        metrics_count = self._process_trickle_measurements(collector, measurements, session)
 
         # Update session stats
         session.last_data_at = timezone.now()
         session.sample_count = (session.sample_count or 0) + metrics_count
-        session.save(update_fields=['last_data_at', 'sample_count'])
+        session.save(update_fields=['last_data_at', 'sample_count', 'previous_sample'])
 
         return Response({
             'status': 'ok',
@@ -1845,12 +1845,17 @@ class TrickleView(APIView):
             'session_id': str(session.id)
         })
 
-    def _process_trickle_measurements(self, collector, measurements):
+    def _process_trickle_measurements(self, collector, measurements, session):
         """
-        Process measurements from pcc trickle format.
+        Process measurements from pcc trickle format with data cubing.
+
+        Uses CubingService to compute delta-based rates from consecutive samples,
+        porting the pcprocess/cube.go "secret sauce" into Python.
+
         Measurements are: [{timestamp, subsystem, measurement}, ...]
         """
         from datetime import datetime
+        from collectors.services.cubing import CubingService
 
         if not isinstance(measurements, list):
             measurements = [measurements]
@@ -1866,37 +1871,83 @@ class TrickleView(APIView):
             subsystem = m.get('subsystem', '')
             grouped[ts][subsystem] = m.get('measurement', '')
 
-        # Process each timestamp group
-        for ts, subsystems in grouped.items():
+        # Load previous sample state for delta calculations
+        prev_sample = session.previous_sample or {}
+
+        # Process each timestamp group (sorted by timestamp for correct delta ordering)
+        for ts in sorted(grouped.keys()):
+            subsystems = grouped[ts]
             try:
                 metric_data = {
                     'collector': collector,
                     'timestamp': datetime.fromtimestamp(ts, tz=timezone.utc) if ts else timezone.now(),
                 }
 
-                # Parse /proc/stat for CPU metrics
+                # Build current raw sample for delta state
+                current_raw = {'timestamp': ts}
+
+                # Calculate interval from previous sample
+                prev_ts = prev_sample.get('timestamp')
+                interval_seconds = (ts - prev_ts) if prev_ts and ts else None
+
+                # ── CPU: Parse raw jiffies and cube via delta ──
                 if '/proc/stat' in subsystems:
-                    cpu_data = self._parse_proc_stat(subsystems['/proc/stat'])
-                    if cpu_data:
-                        metric_data.update(cpu_data)
+                    raw_jiffies = self._parse_proc_stat_raw(subsystems['/proc/stat'])
+                    if raw_jiffies is not None:
+                        current_raw['cpu_jiffies'] = raw_jiffies
+                        # Cube: delta-based CPU percentages
+                        prev_jiffies = prev_sample.get('cpu_jiffies')
+                        cpu_cubed = CubingService.cube_cpu(prev_jiffies, raw_jiffies)
+                        if cpu_cubed:
+                            metric_data.update(cpu_cubed)
 
-                # Parse /proc/meminfo for memory metrics
+                # ── Memory: Direct conversion (no delta needed) ──
                 if '/proc/meminfo' in subsystems:
-                    mem_data = self._parse_meminfo(subsystems['/proc/meminfo'])
-                    if mem_data:
-                        metric_data.update(mem_data)
+                    mem_raw = self._parse_meminfo_raw(subsystems['/proc/meminfo'])
+                    if mem_raw:
+                        mem_cubed = CubingService.cube_memory(mem_raw)
+                        if mem_cubed:
+                            metric_data.update(mem_cubed)
 
-                # Parse /proc/diskstats for disk metrics
+                # ── Disk: Store cumulative + cube rates via delta ──
                 if '/proc/diskstats' in subsystems:
                     disk_data = self._parse_diskstats(subsystems['/proc/diskstats'])
                     if disk_data:
-                        metric_data.update(disk_data)
+                        metric_data.update(disk_data)  # Store cumulative counters
+                        current_raw['disk'] = {
+                            'read_ops': disk_data.get('disk_read_ops', 0),
+                            'write_ops': disk_data.get('disk_write_ops', 0),
+                            'read_bytes': disk_data.get('disk_read_bytes', 0),
+                            'write_bytes': disk_data.get('disk_write_bytes', 0),
+                        }
+                        # Cube: IOPS and MB/s rates
+                        prev_disk = prev_sample.get('disk')
+                        if interval_seconds and interval_seconds > 0:
+                            disk_cubed = CubingService.cube_disk(
+                                prev_disk, current_raw['disk'], interval_seconds
+                            )
+                            if disk_cubed:
+                                metric_data.update(disk_cubed)
 
-                # Parse /proc/net/dev for network metrics
+                # ── Network: Store cumulative + cube rates via delta ──
                 if '/proc/net/dev' in subsystems:
                     net_data = self._parse_netdev(subsystems['/proc/net/dev'])
                     if net_data:
-                        metric_data.update(net_data)
+                        metric_data.update(net_data)  # Store cumulative counters
+                        current_raw['net'] = {
+                            'rx_bytes': net_data.get('net_rx_bytes', 0),
+                            'tx_bytes': net_data.get('net_tx_bytes', 0),
+                            'rx_packets': net_data.get('net_rx_packets', 0),
+                            'tx_packets': net_data.get('net_tx_packets', 0),
+                        }
+                        # Cube: Mbit/s and packets/s rates
+                        prev_net = prev_sample.get('net')
+                        if interval_seconds and interval_seconds > 0:
+                            net_cubed = CubingService.cube_network(
+                                prev_net, current_raw['net'], interval_seconds
+                            )
+                            if net_cubed:
+                                metric_data.update(net_cubed)
 
                 # Create or update the metric record
                 PerformanceMetric.objects.update_or_create(
@@ -1906,15 +1957,27 @@ class TrickleView(APIView):
                 )
                 processed_count += 1
 
+                # Advance delta state for next sample
+                prev_sample = current_raw
+
             except Exception as e:
                 import logging
                 logging.getLogger(__name__).warning(f"Error processing trickle measurement: {e}")
                 continue
 
+        # Persist delta state on the session for the next POST request
+        session.previous_sample = prev_sample
+
         return processed_count
 
-    def _parse_proc_stat(self, measurement):
-        """Parse /proc/stat and return CPU metrics."""
+    def _parse_proc_stat_raw(self, measurement):
+        """
+        Parse /proc/stat and return raw jiffies list for CubingService.
+
+        Returns [user, nice, system, idle, iowait, irq, softirq, steal]
+        or None if parsing fails. CubingService.cube_cpu() uses delta
+        between two consecutive jiffies samples to compute percentages.
+        """
         if not measurement:
             return None
 
@@ -1922,28 +1985,29 @@ class TrickleView(APIView):
             if line.startswith('cpu '):
                 parts = line.split()
                 if len(parts) >= 8:
-                    user = int(parts[1])
-                    nice = int(parts[2])
-                    system = int(parts[3])
-                    idle = int(parts[4])
-                    iowait = int(parts[5]) if len(parts) > 5 else 0
-                    irq = int(parts[6]) if len(parts) > 6 else 0
-                    softirq = int(parts[7]) if len(parts) > 7 else 0
-                    steal = int(parts[8]) if len(parts) > 8 else 0
-
-                    total = user + nice + system + idle + iowait + irq + softirq + steal
-                    if total > 0:
-                        return {
-                            'cpu_user': round(100.0 * (user + nice) / total, 2),
-                            'cpu_system': round(100.0 * system / total, 2),
-                            'cpu_iowait': round(100.0 * iowait / total, 2),
-                            'cpu_idle': round(100.0 * idle / total, 2),
-                            'cpu_steal': round(100.0 * steal / total, 2),
-                        }
+                    try:
+                        return [
+                            int(parts[1]),  # user
+                            int(parts[2]),  # nice
+                            int(parts[3]),  # system
+                            int(parts[4]),  # idle
+                            int(parts[5]) if len(parts) > 5 else 0,  # iowait
+                            int(parts[6]) if len(parts) > 6 else 0,  # irq
+                            int(parts[7]) if len(parts) > 7 else 0,  # softirq
+                            int(parts[8]) if len(parts) > 8 else 0,  # steal
+                        ]
+                    except (ValueError, IndexError):
+                        return None
         return None
 
-    def _parse_meminfo(self, measurement):
-        """Parse /proc/meminfo and return memory metrics in MB."""
+    def _parse_meminfo_raw(self, measurement):
+        """
+        Parse /proc/meminfo and return raw values in MB for CubingService.
+
+        Returns dict with mem_total, mem_free, mem_buffers, mem_cached,
+        mem_slab, mem_available (all in MB). CubingService.cube_memory()
+        uses these to compute mem_used via the sysstat formula.
+        """
         if not measurement:
             return None
 
@@ -1960,21 +2024,17 @@ class TrickleView(APIView):
                         pass
 
         mem_total = values.get('MemTotal', 0)
-        mem_free = values.get('MemFree', 0)
-        mem_available = values.get('MemAvailable', 0)
-        buffers = values.get('Buffers', 0)
-        cached = values.get('Cached', 0)
+        if mem_total <= 0:
+            return None
 
-        if mem_total > 0:
-            mem_used = mem_total - mem_available
-            return {
-                'mem_total': round(mem_total / 1024, 2),  # MB
-                'mem_used': round(mem_used / 1024, 2),  # MB
-                'mem_available': round(mem_available / 1024, 2),  # MB
-                'mem_buffers': round(buffers / 1024, 2),  # MB
-                'mem_cached': round(cached / 1024, 2),  # MB
-            }
-        return None
+        return {
+            'mem_total': round(mem_total / 1024, 2),
+            'mem_free': round(values.get('MemFree', 0) / 1024, 2),
+            'mem_buffers': round(values.get('Buffers', 0) / 1024, 2),
+            'mem_cached': round(values.get('Cached', 0) / 1024, 2),
+            'mem_slab': round(values.get('Slab', 0) / 1024, 2),
+            'mem_available': round(values.get('MemAvailable', 0) / 1024, 2),
+        }
 
     def _parse_diskstats(self, measurement):
         """Parse /proc/diskstats and return disk I/O metrics."""
